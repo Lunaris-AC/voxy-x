@@ -1,0 +1,54 @@
+#version 450 core
+layout(local_size_x = 1) in;
+
+struct DrawCommand {
+    uint  count;
+    uint  instanceCount;
+    uint  firstIndex;
+    int  baseVertex;
+    uint  baseInstance;
+};
+
+// Binding 0: Read from DrawCommandCountBuffer
+layout(binding = 0, std430) readonly restrict buffer DrawCommandCountBuffer {
+    uint cmdGenDispatchX;
+    uint cmdGenDispatchY;
+    uint cmdGenDispatchZ;
+
+    uint opaqueDrawCount;
+    uint translucentDrawCount;
+    uint temporalOpaqueDrawCount;
+
+    DrawCommand cullDrawIndirectCommand;
+};
+
+// Binding 2: Read from IndirectSectionLookupBuffer (the render list)
+layout(binding = 2, std430) readonly restrict buffer IndirectSectionLookupBuffer {
+    uint sectionCount;
+    uint indirectLookup[];
+};
+
+struct DrawMeshTasksIndirectCommand {
+    uint count;
+    uint first;
+};
+
+// Binding 1: Write to MeshTasksIndirectBuffer
+layout(binding = 1, std430) writeonly restrict buffer MeshTasksIndirectBuffer {
+    DrawMeshTasksIndirectCommand opaqueCmd;
+    DrawMeshTasksIndirectCommand translucentCmd;
+    DrawMeshTasksIndirectCommand temporalCmd;
+};
+
+void main() {
+    // For Opaque and Temporal, we bypass cmdgen.comp entirely and dispatch all traversed sections
+    opaqueCmd.count = sectionCount;
+    opaqueCmd.first = 0;
+
+    // Translucent still uses the command generated and sorted count
+    translucentCmd.count = translucentDrawCount;
+    translucentCmd.first = 0;
+
+    temporalCmd.count = sectionCount;
+    temporalCmd.first = 0;
+}
