@@ -199,4 +199,4 @@ The compiled, ready-to-run JAR will be generated inside `build/libs/voxy-x-1.0.0
 
 ## 8. License
 
-Voxy X is licensed under the **All-Rights-Reserved** license. Special thanks to the original creator **Cortex** for archiving the baseline mod and allowing the Voxy X project continuation.
+Voxy X is licensed under the **All-Rights-Reserved** license.
