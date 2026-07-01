@@ -170,6 +170,11 @@ public class Serialization {
         try {
             InputStream stream = Serialization.class.getClassLoader()
                     .getResourceAsStream(pack.replaceAll("[.]", "/"));
+            if (stream == null) {
+                //Some classloaders (e.g. Sinytra Connector's Fabric-on-NeoForge shim) don't expose package
+                //directory listings via getResourceAsStream; the Path-based scan in init() already covers this case
+                return List.of();
+            }
             BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
             return reader.lines().flatMap(inner -> {
                 if (inner.endsWith(".class")) {

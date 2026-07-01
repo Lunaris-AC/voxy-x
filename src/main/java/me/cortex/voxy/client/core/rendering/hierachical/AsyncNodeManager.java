@@ -85,6 +85,9 @@ public class AsyncNodeManager {
     private final IntOpenHashSet cleanerIdResetClear = new IntOpenHashSet();//Tells the cleaner if it needs to clear the id to 0, or reset the id to the current frame
 
     private boolean needsWaitForSync = false;
+    //Only worth debounce-waiting for extra batching when the woken work amount is still small;
+    //if a large batch already queued (e.g. bulk chunk load) there is nothing to gain by delaying
+    private static final int BATCH_WAIT_THRESHOLD = 8;
 
     public AsyncNodeManager(int maxNodeCount, IGeometryData geometryData, RenderGenerationService renderService) {
         //Note the current implmentation of ISectionWatcher is threadsafe
@@ -199,10 +202,13 @@ public class AsyncNodeManager {
                 return;
             }
             //This is a funny thing, wait a bit, this allows for better batching, but this thread is independent of everything else so waiting a bit should be mostly ok
-            try {
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
+            //Only do this when little work has arrived so far; skip it when a large batch is already queued so we don't add needless latency
+            if (this.workCounter.get() < BATCH_WAIT_THRESHOLD) {
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
             }
         }
 
@@ -380,12 +386,10 @@ public class AsyncNodeManager {
         //TODO: also note! this can be done for the processing of rendered out block models!!
         // (it might be able to also be put in this thread, maybe? but is proabably worth putting in own thread for latency reasons)
         if (this.needsWaitForSync) {
+            //Woken immediately by tick() once the render thread consumes the result via RESULT_HANDLE.getAndSet+unpark,
+            //the timeout is just a safety net against a missed/racy unpark
             while (RESULT_HANDLE.get(this) != null && this.running) {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
-                }
+                LockSupport.parkNanos(5_000_000L);
             }
         }
 
@@ -518,6 +522,7 @@ public class AsyncNodeManager {
             throw new RuntimeException(this.uncaughtException);//Propagate internal exception
         }
         var results = (SyncResults)RESULT_HANDLE.getAndSet(this, null);//Acquire the results
+        LockSupport.unpark(this.thread);//Wake the worker immediately if it's parked waiting on this slot to free up
         if (results == null) {//There are no new results to process, return
             return;
         }

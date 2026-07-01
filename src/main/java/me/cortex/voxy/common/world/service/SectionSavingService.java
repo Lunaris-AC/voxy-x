@@ -28,9 +28,19 @@ public class SectionSavingService {
         section.assertNotFree();
         try {
             //Unmark it dirty here (if it wasnt or w/e) so that it doesnt pointlessly resave (in theory this should be safe to do)
+            //Clearing before the actual write (rather than after) is intentional: if another thread marks the
+            //section dirty again while the write below is in flight, that newer dirty mark must survive so a
+            //future save picks it up.
             section.setNotDirty();
             if (section.exchangeIsInSaveQueue(false)) {
-                task.engine.storage.saveSection(section);
+                try {
+                    task.engine.storage.saveSection(section);
+                } catch (Exception e) {
+                    //The write didn't actually make it to storage, so restore the dirty flag we cleared above -
+                    //otherwise this section's pending changes are silently dropped forever
+                    section.markDirty();
+                    throw e;
+                }
             }
         } catch (Exception e) {
             Logger.error("Voxy saver had an exception while executing please check logs and report error", e);
