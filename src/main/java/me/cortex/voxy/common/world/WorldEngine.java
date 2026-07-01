@@ -46,17 +46,24 @@ public class WorldEngine {
     private final AtomicInteger refCount = new AtomicInteger();
     volatile long lastActiveTime = System.currentTimeMillis();//Time in millis the world was last "active" i.e. had a total ref count or active section count of != 0
 
+    public static int defaultSectionCacheSize() {
+        int cacheSize = 1024;
+        if (Runtime.getRuntime().maxMemory()>=(1L<<32)-(200L<<20)) {
+            cacheSize = 2048;
+        }
+        return cacheSize;
+    }
+
     public WorldEngine(SectionStorage storage) {
         this(storage, null);
     }
 
     public WorldEngine(SectionStorage storage, @Nullable VoxyInstance instance) {
-        this.instanceIn = instance;
+        this(storage, instance, defaultSectionCacheSize());
+    }
 
-        int cacheSize = 1024;
-        if (Runtime.getRuntime().maxMemory()>=(1L<<32)-(200L<<20)) {
-            cacheSize = 2048;
-        }
+    public WorldEngine(SectionStorage storage, @Nullable VoxyInstance instance, int cacheSize) {
+        this.instanceIn = instance;
 
         this.storage = storage;
         this.mapper = new Mapper(this.storage);

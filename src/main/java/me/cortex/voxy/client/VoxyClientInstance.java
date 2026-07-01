@@ -56,6 +56,28 @@ public class VoxyClientInstance extends VoxyInstance {
     }
 
     @Override
+    protected int getSectionCacheSize() {
+        //The default cache size is tuned for the base render distance (16); scale it up for larger configured
+        //render distances so the LRU secondary cache actually covers the live working set instead of thrashing
+        //(each miss forces the expensive write-lock "loader" path in ActiveSectionTracker, seen as a hot path
+        //in profiling during bulk LOD streaming on high render-distance setups)
+        int base = me.cortex.voxy.common.world.WorldEngine.defaultSectionCacheSize();
+        float rd = VoxyConfig.CONFIG.sectionRenderDistance;
+        double scale = Math.max(1.0, (rd * rd) / (16.0 * 16.0));
+        long scaled = (long) (base * scale);
+
+        //Cap by available heap so this can't balloon on memory-constrained setups: each cached section is
+        //~512KB (32*32*32 voxels * 2 longs). NOTE: the unscaled default (base) already sits at ~1-1.5% of a
+        //typical 8GB heap, so the budget here must clear that comfortably or scaling never has any effect
+        //(the old 12% figure was miscalibrated and silently clamped straight back down to base on 8GB heaps)
+        long maxHeap = Runtime.getRuntime().maxMemory();
+        long heapBudgetEntries = (long) (maxHeap * 0.30) / (512L << 10);
+
+        long clamped = Math.min(scaled, Math.max(heapBudgetEntries, base));
+        return (int) Math.min(clamped, Integer.MAX_VALUE);
+    }
+
+    @Override
     protected ImportManager createImportManager() {
         return new ClientImportManager();
     }

@@ -166,6 +166,12 @@ public abstract class VoxyInstance {
 
     protected abstract SectionStorage createStorage(WorldIdentifier identifier);
 
+    //Overridden client-side to scale with the configured render distance; the memory-based default here
+    //is sized conservatively for headless/server usage where there is no render-distance concept
+    protected int getSectionCacheSize() {
+        return WorldEngine.defaultSectionCacheSize();
+    }
+
     private WorldEngine createWorld(WorldIdentifier identifier) {
         if (!this.isRunning) {
             throw new IllegalStateException("Cannot create world while not running");
@@ -174,7 +180,7 @@ public abstract class VoxyInstance {
             throw new IllegalStateException("Existing world with identifier");
         }
         Logger.info("Creating new world engine: " + identifier.getLongHash() + "@" + System.identityHashCode(this));
-        var world = new WorldEngine(this.createStorage(identifier), this);
+        var world = new WorldEngine(this.createStorage(identifier), this, this.getSectionCacheSize());
         world.setSaveCallback(this.savingService::enqueueSave);
         this.activeWorlds.put(identifier, world);
         return world;
