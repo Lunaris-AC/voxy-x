@@ -286,17 +286,36 @@ public class ModelFactory {
         while (this.processModelResult());
     }
 
-    public void processUploads() {
+    public void processUploads(long budgetNanos) {
         var upload = this.uploadResults.poll();
         if (upload==null) return;
+
+        long start = System.nanoTime();
 
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         do {
+            long itemStart = System.nanoTime();
             upload.upload(this.storage);
+            long itemNs = System.nanoTime() - itemStart;
+            if (itemNs > 4_000_000L) {
+                // The between-items budget below can't cap a single slow
+                // upload; measured one-off 16ms items on ECHO (2026-07-11).
+                // Log which kind it was so the cause (texture size vs model
+                // store growth) can be identified from a normal session.
+                me.cortex.voxy.common.Logger.info(String.format(
+                    "[spike] model upload item %.1fms type=%s",
+                    itemNs / 1e6, upload.getClass().getSimpleName()
+                ));
+            }
             upload.free();
+            // Budget check between uploads: unprocessed entries stay queued
+            // for the next frame instead of stalling this one.
+            if (System.nanoTime() - start > budgetNanos) {
+                break;
+            }
             upload = this.uploadResults.poll();
         } while (upload != null);
         UploadStream.INSTANCE.commit();

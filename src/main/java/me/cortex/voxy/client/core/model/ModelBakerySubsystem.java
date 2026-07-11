@@ -53,7 +53,11 @@ public class ModelBakerySubsystem {
             Logger.error(this.processingThreadException.getStackTrace().toString(), this.processingThreadException);
             throw new RuntimeException(this.processingThreadException);
         }
-        this.factory.processUploads();
+        // The budget parameter used to be ignored and processUploads drained
+        // the entire queue in one frame - a camera turn revealing many new
+        // block types produced 15ms+ single-frame stalls (measured on ECHO,
+        // 2026-07-10). Leftover uploads simply roll over to the next frame.
+        this.factory.processUploads(totalBudget);
     }
 
     public void shutdown() {

@@ -44,6 +44,12 @@ bool _frustumCulled = false;
 float _screenSize = 0.0f;
 float _nodeDistance = 0.0f;
 
+//Stored by setupScreenspace before its frustum early-exit, so the prefetch
+//path can re-test with an inflated bounds and estimate LOD selection for
+//nodes whose real screenspace projection was never computed.
+vec3 _basePos = vec3(0.0f);
+float _worldSize = 0.0f;
+
 #ifdef TAA
 vec2 getTAA();
 #endif
@@ -66,6 +72,9 @@ void setupScreenspace(in UnpackedNode node) {
     vec3 basePos = vec3(((node.pos<<node.lodLevel)-camSecPos)<<5)-camSubSecPos;
     // Compute distance from camera to the center of this node (in blocks)
     _nodeDistance = length(basePos + vec3(float(16 << node.lodLevel)));
+
+    _basePos = basePos;
+    _worldSize = float(32<<node.lodLevel);
 
     _frustumCulled = outsideFrustum(frustum, basePos, float(32<<node.lodLevel));
 
@@ -196,5 +205,28 @@ bool shouldDecend() {
         scaledMinSSS *= (_nodeDistance / 512.0f);
     }
     return _screenSize > scaledMinSSS;
+}
+
+//Re-test the node against the frustum inflated by `margin` blocks. Only
+//meaningful after setupScreenspace ran for this node (uses its stored
+//bounds). Used by the prefetch path for frustum-culled nodes.
+bool outsideFrustumWide(float margin) {
+    return outsideFrustum(frustum, _basePos - vec3(margin), _worldSize + 2.0f*margin);
+}
+
+//shouldDecend() equivalent for frustum-culled nodes: their projected
+//screenspace area was never computed (setupScreenspace early-exits), so
+//estimate it from distance with the camera-facing approximation
+//area = projScale * worldSize^2 / distance^2. Slight under-estimate vs the
+//real 3-face projected area, biasing prefetch toward coarser LODs - fine,
+//the tight pass refines them the moment they actually enter the view.
+bool shouldDecendEstimate(float projScaleArea) {
+    float d2 = max(_nodeDistance*_nodeDistance, 1.0f);
+    float estSize = projScaleArea * (_worldSize*_worldSize) / d2;
+    float scaledMinSSS = minSSS;
+    if (_nodeDistance > 512.0f) {
+        scaledMinSSS *= (_nodeDistance / 512.0f);
+    }
+    return estSize > scaledMinSSS;
 }
 

@@ -134,13 +134,28 @@ public class UploadStream {
         this.offset = 0;
     }
 
+    /**
+     * CPU wall time (ns) of the last tick's two phases (commit = flush +
+     * glCopyNamedBufferSubData batch; fences = fence poll + arena frees),
+     * plus the number of copies the commit executed - for the renderOpaque
+     * spike log, to attribute tick() stalls to driver copy submission vs
+     * fence handling.
+     */
+    public static long TICK_SPIKE_COMMIT_NS = 0;
+    public static long TICK_SPIKE_FENCE_NS = 0;
+    public static int TICK_SPIKE_COPIES = 0;
+
     public void tick() {
         this.tick(true);
     }
     private void tick(boolean commit) {
+        long t0 = System.nanoTime();
         if (commit) {
+            TICK_SPIKE_COPIES = this.uploadList.size();
             this.commit();
         }
+        long t1 = System.nanoTime();
+        TICK_SPIKE_COMMIT_NS = t1 - t0;
 
         if (!this.thisFrameAllocations.isEmpty()) {
             this.frames.add(new UploadFrame(new GlFence(), new LongArrayList(this.thisFrameAllocations)));
@@ -158,6 +173,7 @@ public class UploadStream {
             frame.allocations.forEach(this.allocationArena::free);
             frame.fence.free();
         }
+        TICK_SPIKE_FENCE_NS = System.nanoTime() - t1;
     }
 
     public long getBaseAddress() {

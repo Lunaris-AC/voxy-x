@@ -18,6 +18,13 @@ layout(binding = SCENE_UNIFORM_BINDING, std140) uniform SceneUniform {
     uint frameId;
     uint requestQueueSize;
     float renderDistance;
+    //Prefetch: traversal/mesh-requests use a frustum inflated by this many
+    //blocks so sections just outside the view get meshed BEFORE the camera
+    //turns onto them; rendering stays gated on the tight frustum. 0 disables.
+    float prefetchMargin;
+    //Projection scale (P00*P11*0.25) to estimate the screenspace area of
+    //frustum-culled nodes (their real projected size can't be computed).
+    float projScaleArea;
 };
 
 #import <voxy:lod/hierarchical/queue.glsl>
@@ -125,13 +132,25 @@ void traverse(in UnpackedNode node) {
     setupScreenspace(node);
     //debugDumpNode(node);
 
-    if (outsideFrustum() || isCulledByHiz()) {
-        //printf("culled");
-    } else {
-        //It is visible, TODO: maybe do a more detailed hiz test? (or make it so that )
+    //Tight visibility drives RENDERING exactly as before. The prefetch
+    //path additionally traverses nodes that are only frustum-culled (not
+    //occlusion-culled) but fall within the frustum inflated by
+    //prefetchMargin blocks, emitting mesh REQUESTS only - so the meshes
+    //are already resident when the camera turns onto them, instead of
+    //visibly building at the screen edge and flooding the upload path in
+    //bursts (the camera-rotation stutter measured on ECHO, 2026-07-11).
+    bool tightVisible = !(outsideFrustum() || isCulledByHiz());
+    bool prefetchOnly = false;
+    if (!tightVisible && prefetchMargin > 0.0f && outsideFrustum()) {
+        //Note: HiZ can't be consulted here (the node has no valid screen
+        //projection); occlusion-culled in-frustum nodes stay skipped.
+        prefetchOnly = !outsideFrustumWide(prefetchMargin);
+    }
 
+    if (tightVisible || prefetchOnly) {
         //Only decend if not a root node
-        if (node.lodLevel!=0 && shouldDecend()) {
+        bool decend = prefetchOnly ? shouldDecendEstimate(projScaleArea) : shouldDecend();
+        if (node.lodLevel!=0 && decend) {
             if (hasChildren(node)) {
                 //printf("A");
                 enqueueChildren(node);
@@ -142,8 +161,8 @@ void traverse(in UnpackedNode node) {
                 // Basicly guarenteed to have a mesh, if it doesnt it is very very bad and incorect since its a violation of the graph properties
                 // that all leaf nodes must contain a mesh
 
-                bool shouldRenderSelf = renderDistance<0.0f;
-                if (!shouldRenderSelf) {
+                bool shouldRenderSelf = !prefetchOnly && renderDistance<0.0f;
+                if (!shouldRenderSelf && !prefetchOnly) {
                     vec3 far = furthestPointToCamera(node);
                     shouldRenderSelf = (far.x*far.x+far.z*far.z+(16*16*16))<=renderDistance;//the +16*16 is to add some buffer room
                 }
@@ -155,7 +174,9 @@ void traverse(in UnpackedNode node) {
         } else {
             if (hasMesh(node)) {
                 //printf("C");
-                enqueueSelfForRender(node);
+                if (!prefetchOnly) {
+                    enqueueSelfForRender(node);
+                }
             } else {
                 //printf("D");
                 //!! not ideal, we want to render this mesh but dont have it. If we havent sent a request

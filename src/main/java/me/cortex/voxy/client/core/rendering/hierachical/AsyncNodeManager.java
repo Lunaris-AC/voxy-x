@@ -516,6 +516,16 @@ public class AsyncNodeManager {
     }
 
     private IntConsumer tlnAddCallback; private IntConsumer tlnRemoveCallback;
+
+    /**
+     * CPU wall time (ns) of the last tick's phases, for the renderOpaque
+     * spike log. Indices: 0 tlnDelta callbacks, 1 geometry upload
+     * (memcpy+commit+dispatch), 2 scatter writes, 3 cleaner. Plus the batch
+     * sizes that produced them, to correlate cost with batch composition.
+     */
+    public static final long[] TICK_SPIKE_NS = new long[4];
+    public static final int[] TICK_SPIKE_COUNTS = new int[4];
+
     //Render thread synchronization
     public void tick(GlBuffer nodeBuffer, NodeCleaner cleaner) {//TODO: dont pass nodeBuffer here??, do something else thats better
         if (this.uncaughtException != null) {
@@ -527,8 +537,13 @@ public class AsyncNodeManager {
             return;
         }
 
+        java.util.Arrays.fill(TICK_SPIKE_NS, 0);
+        java.util.Arrays.fill(TICK_SPIKE_COUNTS, 0);
+        long spikeT = System.nanoTime();
+
         //top level node add/remove
         if (!results.tlnDelta.isEmpty()) {
+            TICK_SPIKE_COUNTS[0] = results.tlnDelta.size();
             var iter = results.tlnDelta.intIterator();
             while (iter.hasNext()) {
                 int val = iter.nextInt();
@@ -540,6 +555,8 @@ public class AsyncNodeManager {
             }
             //Dont need to clear as is not used again
         }
+        TICK_SPIKE_NS[0] = System.nanoTime() - spikeT;
+        spikeT = System.nanoTime();
 
         {//Update basic geometry data
             var store = (BasicSectionGeometryData)this.geometryData;
@@ -547,6 +564,7 @@ public class AsyncNodeManager {
             store.setSectionCount(results.geometrySectionCount);
 
             var upload = results.geometryUpload;
+            TICK_SPIKE_COUNTS[1] = upload.dataUploadPoints.size();
             if (!upload.dataUploadPoints.isEmpty()) {
                 ((BasicSectionGeometryData)this.geometryData).ensureAccessable(upload.maxElementAccess);
                 TimingStatistics.A.start();
@@ -576,8 +594,11 @@ public class AsyncNodeManager {
                 TimingStatistics.A.stop();
             }
         }
+        TICK_SPIKE_NS[1] = System.nanoTime() - spikeT;
+        spikeT = System.nanoTime();
 
         TimingStatistics.B.start();
+        TICK_SPIKE_COUNTS[2] = results.scatterWriteLocationMap.size();
         if (!results.scatterWriteLocationMap.isEmpty()) {//Scatter write
             int count = results.scatterWriteLocationMap.size();//Number of writes, not chunks or uvec4 count
             int chunks = (count+3)/4;
@@ -596,12 +617,16 @@ public class AsyncNodeManager {
             glMemoryBarrier(GL_UNIFORM_BARRIER_BIT|GL_SHADER_STORAGE_BARRIER_BIT);
         }
         TimingStatistics.B.stop();
+        TICK_SPIKE_NS[2] = System.nanoTime() - spikeT;
+        spikeT = System.nanoTime();
 
         TimingStatistics.C.start();
+        TICK_SPIKE_COUNTS[3] = results.cleanerOperations.size();
         if (!results.cleanerOperations.isEmpty()) {
             cleaner.updateIds(results.cleanerOperations);
         }
         TimingStatistics.C.stop();
+        TICK_SPIKE_NS[3] = System.nanoTime() - spikeT;
 
         this.currentMaxNodeId = results.currentMaxNodeId;
         this.usedGeometryAmount = results.usedGeometry;

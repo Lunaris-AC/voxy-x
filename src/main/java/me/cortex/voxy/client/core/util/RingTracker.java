@@ -8,8 +8,25 @@ import java.util.Random;
 //Tracks a ring and load/unload positions
 // can process N of these load/unload positions
 public class RingTracker {
-    //TODO: replace with custom map that removes elements if its mapped to 0
     private final Long2ByteOpenHashMap operations = new Long2ByteOpenHashMap(1<<13);
+
+    /**
+     * addTo that removes the entry when it cancels out to 0 instead of
+     * leaving a dead entry behind. The old behavior (the TODO that used to
+     * sit on the map above) let thousands of cancelled entries accumulate
+     * during sustained movement; process() then swept them all inside a
+     * single call - measured 13-18ms single-frame stalls on ECHO
+     * (2026-07-11) that no per-call work budget could prevent, since the
+     * sweep happened between two live entries. Returns the previous value
+     * like addTo does.
+     */
+    private byte addToOps(long key, byte delta) {
+        byte prev = this.operations.addTo(key, delta);
+        if (prev + delta == 0) {
+            this.operations.remove(key);
+        }
+        return prev;
+    }
     private final int[] boundDist;
     private final int radius;
     private int centerX;
@@ -42,7 +59,7 @@ public class RingTracker {
             int x = this.centerX + i - this.radius;
             int d = this.boundDist[i];
             for (int z = this.centerZ-d; z <= this.centerZ+d; z++) {
-                int res = this.operations.addTo(pack(x, z), (byte) (load?1:-1));
+                int res = this.addToOps(pack(x, z), (byte) (load?1:-1));
                 if ((load&&0<res)||(((!load)&&res<0))) {
                     throw new IllegalStateException();
                 }
@@ -82,9 +99,9 @@ public class RingTracker {
                 int d = this.boundDist[i]*delta;
                 int pz = this.centerZ+d+delta;//Point to add (we need to offset by 1 in the mov direction)
                 int nz = this.centerZ-d;//Point to rem
-                if (0<this.operations.addTo(pack(x, pz), (byte) 1))//Load point
+                if (0<this.addToOps(pack(x, pz), (byte) 1))//Load point
                     throw new IllegalStateException("x: "+x+", z: "+pz+" state: "+this.operations.get(pack(x, pz)));
-                if (this.operations.addTo(pack(x, nz), (byte) -1)<0)//Unload point
+                if (this.addToOps(pack(x, nz), (byte) -1)<0)//Unload point
                     throw new IllegalStateException("x: "+x+", z: "+nz+" state: "+this.operations.get(pack(x, nz)));
             }
             this.centerZ += delta;
@@ -96,12 +113,12 @@ public class RingTracker {
                 int d = this.boundDist[i]*sDelta;
                 int pz = this.centerZ+d;//Point to add (we need to offset by 1 in the mov direction)
                 for (int z = pz + (sDelta<0?delta:1); z <= pz + (sDelta<0?-1:delta); z++) {
-                    if (0<this.operations.addTo(pack(x, z), (byte) 1))//Load point
+                    if (0<this.addToOps(pack(x, z), (byte) 1))//Load point
                         throw new IllegalStateException();
                 }
                 int nz = this.centerZ-d;//Point to rem
                 for (int z = nz + (sDelta<0?(delta+1):0); z < nz + (sDelta<0?1:delta); z++) {
-                    if (this.operations.addTo(pack(x, z), (byte) -1)<0)//Unload point
+                    if (this.addToOps(pack(x, z), (byte) -1)<0)//Unload point
                         throw new IllegalStateException();
                 }
             }
@@ -119,9 +136,9 @@ public class RingTracker {
                 int d = this.boundDist[i]*delta;
                 int px = this.centerX+d+delta;//Point to add (we need to offset by 1 in the mov direction)
                 int nx = this.centerX-d;//Point to rem
-                if (0<this.operations.addTo(pack(px, z), (byte) 1))//Load point
+                if (0<this.addToOps(pack(px, z), (byte) 1))//Load point
                     throw new IllegalStateException();
-                if (this.operations.addTo(pack(nx, z), (byte) -1)<0)//Unload point
+                if (this.addToOps(pack(nx, z), (byte) -1)<0)//Unload point
                     throw new IllegalStateException();
             }
             this.centerX += delta;
@@ -133,12 +150,12 @@ public class RingTracker {
                 int d = this.boundDist[i]*sDelta;
                 int px = this.centerX+d;//Point to add (we need to offset by 1 in the mov direction)
                 for (int x = px + (sDelta<0?delta:1); x <= px + (sDelta<0?-1:delta); x++) {
-                    if (0<this.operations.addTo(pack(x, z), (byte) 1))//Load point
+                    if (0<this.addToOps(pack(x, z), (byte) 1))//Load point
                         throw new IllegalStateException();
                 }
                 int nx = this.centerX-d;//Point to rem
                 for (int x = nx + (sDelta<0?(delta+1):0); x < nx + (sDelta<0?1:delta); x++) {
-                    if (this.operations.addTo(pack(x, z), (byte) -1)<0)//Unload point
+                    if (this.addToOps(pack(x, z), (byte) -1)<0)//Unload point
                         throw new IllegalStateException();
                 }
             }

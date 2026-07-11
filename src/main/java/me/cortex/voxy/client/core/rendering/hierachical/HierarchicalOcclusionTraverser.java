@@ -35,7 +35,23 @@ import static org.lwjgl.opengl.GL45.*;
 public class HierarchicalOcclusionTraverser {
     public static final boolean HIERARCHICAL_SHADER_DEBUG = System.getProperty("voxy.hierarchicalShaderDebug", "false").equals("true");
 
-    public static final int MAX_REQUEST_QUEUE_SIZE = 50;
+    // Per-traversal cap on mesh-request DISCOVERY. This is not what
+    // protects frame time (the mesh-gen backpressure in uploadUniform
+    // quadratically throttles requestSize as the task queue fills toward
+    // TARGET_COUNT) - it only bounds how fast empty capacity gets refilled.
+    // At 50, initial world load and camera prefetch trickled in at 50
+    // sections/frame even with 12 idle mesh threads, dominating the
+    // time-to-stable at join. Buffer cost is 8 bytes per slot.
+    public static final int MAX_REQUEST_QUEUE_SIZE = 256;
+
+    /**
+     * Mesh-request prefetch margin in blocks: the traversal requests (but
+     * does not render) meshes for nodes within the view frustum inflated by
+     * this amount, so a camera rotation lands on already-resident meshes
+     * instead of triggering visible edge-of-screen rebuilds and bursty
+     * uploads. 0 disables prefetching (previous behavior).
+     */
+    private static final float PREFETCH_MARGIN_BLOCKS = 96.0f;
     public static final int MAX_QUEUE_SIZE = 200_000;
 
 
@@ -227,7 +243,16 @@ public class HierarchicalOcclusionTraverser {
         //Put the render distance here so that it can generate a correct circle, TODO: make it not top level section sized
         MemoryUtil.memPutFloat(ptr, (float) Math.pow(VoxyConfig.CONFIG.sectionRenderDistance*16*32,2));ptr += 4;
 
+        //Prefetch margin (blocks): traversal emits mesh requests for nodes
+        //within the frustum inflated by this much, without rendering them -
+        //meshes are resident before the camera turns onto them instead of
+        //visibly building at the screen edge in upload bursts.
+        MemoryUtil.memPutFloat(ptr, PREFETCH_MARGIN_BLOCKS); ptr += 4;
 
+        //Projection scale for estimating screenspace area of frustum-culled
+        //nodes (area ~= scale * size^2 / dist^2 for a camera-facing quad).
+        float projScaleArea = viewport.projection.m00() * viewport.projection.m11() * 0.25f;
+        MemoryUtil.memPutFloat(ptr, projScaleArea); ptr += 4;
     }
 
     private void bindings(Viewport<?> viewport) {
