@@ -53,6 +53,12 @@ public final class CallerStencilState {
         glStencilMask(this.writeMask);
     }
 
+    @Override
+    public String toString() {
+        return String.format("stencil[enabled=%s func=0x%X ref=%d valueMask=0x%X writeMask=0x%X]",
+            this.enabled, this.func, this.ref, this.valueMask, this.writeMask);
+    }
+
     // Single instance is enough: renderOpaque captures at entry and every
     // consumer (composite blit, state handback) runs before the next
     // renderOpaque call, including nested portal views which each get their

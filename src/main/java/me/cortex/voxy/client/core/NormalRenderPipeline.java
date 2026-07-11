@@ -44,6 +44,9 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     private final boolean useEnvFog;
     private final FullscreenBlit finalBlit;
 
+    // Rate limiter for the portal-view composite diagnostic in finish().
+    private long lastPortalCompositeLogNs = 0;
+
     private final SSAO ssao;
 
     protected NormalRenderPipeline(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
@@ -99,6 +102,25 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
         float renderDistance = Minecraft.getInstance().gameRenderer.getRenderDistance();
         boolean fogCoversAllRendering = fogEnd < renderDistance;
+
+        // Diagnostic for voxy terrain vanishing in portal views (rate
+        // limited): whether the composite ran and with which fog values.
+        {
+            long now = System.nanoTime();
+            if (me.cortex.voxy.client.core.util.ImmersivePortalsCompat.getCurrentPortalViewToken() != null
+                    && now - lastPortalCompositeLogNs > 2_000_000_000L) {
+                lastPortalCompositeLogNs = now;
+                int depthFunc = org.lwjgl.opengl.GL11C.glGetInteger(org.lwjgl.opengl.GL11C.GL_DEPTH_FUNC);
+                boolean depthMask = org.lwjgl.opengl.GL11C.glGetBoolean(org.lwjgl.opengl.GL11C.GL_DEPTH_WRITEMASK);
+                me.cortex.voxy.common.Logger.info(String.format(
+                    "[portal-view] composite=%s fogStart=%.0f fogEnd=%.0f renderDistance=%.0f viewport=%dx%d frameId=%d"
+                    + " depthFunc=0x%X depthMask=%s %s",
+                    !fogCoversAllRendering, fogStart, fogEnd, renderDistance, viewport.width, viewport.height,
+                    viewport.frameId, depthFunc, depthMask,
+                    me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE
+                ));
+            }
+        }
 
         if (this.useEnvFog) {
             if (Math.abs(fogEnd - fogStart) > 1) {

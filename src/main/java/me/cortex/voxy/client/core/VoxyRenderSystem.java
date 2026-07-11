@@ -83,8 +83,9 @@ public class VoxyRenderSystem {
     // (visible as exploded/garbage terrain, only when a portal is in view).
     private int lastProcessedFrame = -1;
 
-    // Rate limiter for the renderOpaque spike log below.
+    // Rate limiters for the renderOpaque spike log and skip diagnostic.
     private long lastSpikeLogNanos = 0;
+    private long lastSkipLogNanos = 0;
 
     private final ViewportSelector<?> viewportSelector;
 
@@ -255,10 +256,16 @@ public class VoxyRenderSystem {
     }
 
     public void renderOpaque(Viewport<?> viewport) {
-        if (viewport == null) {
-            return;
-        }
-        if (viewport.width <= 0 || viewport.height <= 0) {
+        if (viewport == null || viewport.width <= 0 || viewport.height <= 0) {
+            // Diagnostic for voxy terrain vanishing in portal views: log
+            // (rate limited) when a portal view's render is skipped here.
+            long now = System.nanoTime();
+            if (me.cortex.voxy.client.core.util.ImmersivePortalsCompat.getCurrentPortalViewToken() != null
+                    && now - this.lastSkipLogNanos > 2_000_000_000L) {
+                this.lastSkipLogNanos = now;
+                Logger.info("[portal-view] renderOpaque skipped: "
+                    + (viewport == null ? "viewport=null" : ("viewport=" + viewport.width + "x" + viewport.height)));
+            }
             return;//Only render on valid viewport
         }
 
@@ -272,6 +279,21 @@ public class VoxyRenderSystem {
         // views with GL_EQUAL stencil testing; the composite blit and the
         // state handback below must honor it, see CallerStencilState).
         me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE.capture();
+
+        // Immersive Portals also clips portal-view geometry against the
+        // portal plane with GL_CLIP_DISTANCE0 - it patches Sodium's shaders
+        // to emit gl_ClipDistance, but voxy's shaders don't write it, and
+        // rendering with the clip enable set while the shader doesn't emit
+        // the distance is undefined behavior (on NVIDIA: everything gets
+        // clipped - the LOD terrain simply vanished from portal views).
+        // Disable it for the whole voxy pass; the LOD terrain of the
+        // destination dimension lies on the visible side of the portal
+        // plane anyway, and the composite is already stencil-clipped to
+        // the portal's screen shape.
+        boolean clipPlane0WasEnabled = org.lwjgl.opengl.GL11C.glIsEnabled(org.lwjgl.opengl.GL30C.GL_CLIP_DISTANCE0);
+        if (clipPlane0WasEnabled) {
+            org.lwjgl.opengl.GL11C.glDisable(org.lwjgl.opengl.GL30C.GL_CLIP_DISTANCE0);
+        }
 
         // Attribute this pass's GPU timings to the right view type in the
         // F3 readout (M = main view, P = a portal's nested view).
@@ -431,6 +453,11 @@ public class VoxyRenderSystem {
             // drew after voxy (entities, remaining terrain passes, ...),
             // splattering it across the whole screen.
             me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE.apply();
+            // Same for the portal-plane clip distance (see the capture at
+            // the top of this method).
+            if (clipPlane0WasEnabled) {
+                org.lwjgl.opengl.GL11C.glEnable(org.lwjgl.opengl.GL30C.GL_CLIP_DISTANCE0);
+            }
 
             GlStateManager._glBindVertexArray(0);//Clear binding
 
