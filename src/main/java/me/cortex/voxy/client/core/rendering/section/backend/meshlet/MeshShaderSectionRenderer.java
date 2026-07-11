@@ -297,14 +297,36 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
 
     @Override
     public void renderTemporal(MDICViewport viewport) {
-        if (this.geometryManager.getSectionCount() == 0) return;
-        this.renderTerrain(viewport, TEMPORAL_OFFSET*5*4, 4*5, TEMPORAL_DRAW_COUNT, 2);
+        // this.terrainShader is always compiled from the "fused" task/mesh
+        // source (task_fused.glsl/mesh_fused.glsl), which reads the full
+        // section list straight from indirectLookupBuffer without ever
+        // consulting commandOffset/drawType (unlike the non-fused task.glsl
+        // used for translucency, which explicitly uses them to select a
+        // subset). Since the fused shader doesn't distinguish "temporal"
+        // sections from the rest, calling renderTerrain again here redrew
+        // the exact same terrain renderOpaque() already drew this frame -
+        // doubling the mesh-shader dispatch cost and producing visual
+        // corruption from the terrain being drawn twice with a drawType
+        // the shader can't actually act on. renderOpaque() already covers
+        // everything the fused pipeline needs in one pass.
     }
+
+    /**
+     * CPU wall time (ns) of the last buildDrawCalls call's sections, for
+     * the renderOpaque spike log (a CPU stall in here means a GL call is
+     * blocking on the driver, e.g. an implicit sync on a busy buffer).
+     * Indices: 0 uniformUpload, 1 prepDispatch, 2 occlusionTest,
+     * 3 cmdGen, 4 translucencySort, 5 meshPrep.
+     */
+    public static final long[] BUILD_SPIKE_NS = new long[6];
 
     @Override
     public void buildDrawCalls(MDICViewport viewport) {
         if (this.geometryManager.getSectionCount() == 0) return;
+        long bt0 = System.nanoTime();
         this.uploadUniformBuffer(viewport);
+        long bt1 = System.nanoTime();
+        BUILD_SPIKE_NS[0] = bt1 - bt0;
 
         {// Dispatch prep
             this.prepShader.bind();
@@ -315,6 +337,8 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
             glDispatchCompute(1, 1, 1);
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
         }
+        BUILD_SPIKE_NS[1] = System.nanoTime() - bt1;
+        bt1 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker("OT");
         {// Test occlusion
@@ -343,6 +367,8 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
                 glDisable(GL_REPRESENTATIVE_FRAGMENT_TEST_NV);
             }
         }
+        BUILD_SPIKE_NS[2] = System.nanoTime() - bt1;
+        bt1 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker("CG");
         {// Generate the commands
@@ -379,6 +405,8 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
                 });
             }
         }
+        BUILD_SPIKE_NS[3] = System.nanoTime() - bt1;
+        bt1 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker("TS");
         {// Do translucency sorting
@@ -401,6 +429,8 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
             glDispatchComputeIndirect(0);
             glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
         }
+        BUILD_SPIKE_NS[4] = System.nanoTime() - bt1;
+        bt1 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker("MP");
         {// Dispatch mesh prep
@@ -412,6 +442,7 @@ public class MeshShaderSectionRenderer extends AbstractSectionRenderer<MDICViewp
             glDispatchCompute(1, 1, 1);
             glMemoryBarrier(GL_COMMAND_BARRIER_BIT | GL_SHADER_STORAGE_BARRIER_BIT);
         }
+        BUILD_SPIKE_NS[5] = System.nanoTime() - bt1;
     }
 
     @Override

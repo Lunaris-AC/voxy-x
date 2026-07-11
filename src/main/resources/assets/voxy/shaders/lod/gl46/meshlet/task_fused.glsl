@@ -11,6 +11,15 @@ layout(binding = 0, std140) uniform SceneUniform {
     vec3 cameraSubPos;
 };
 
+// Not read by this shader (the fused task/mesh path doesn't need a per-draw
+// command offset or draw-type split), but MeshShaderSectionRenderer.renderTerrain
+// uploads to locations 0/1 unconditionally regardless of which task shader
+// variant is bound. Without these declared here, the driver is free to assign
+// locations 0/1 to unrelated uniforms in the linked program (e.g. a bindless
+// sampler in mesh_fused.glsl/quads.frag), causing a type mismatch at upload.
+layout(location = 0) uniform uint commandOffset;
+layout(location = 1) uniform uint drawType;
+
 #import <voxy:lod/section.glsl>
 
 // Binding 2: Section metadata buffer

@@ -19,10 +19,23 @@ public class GPUTiming {
 
     private final GlTimestampQuerySet<String> timingSet = new GlTimestampQuerySet(String.class);
 
-    private float[] timings = new float[0];
-    private String[] lables = new String[0];
+    // Rolling per-stage GPU times keyed by "viewTag·label" instead of the
+    // old positional arrays: with Immersive Portals, renderOpaque runs once
+    // for the main view and once per portal view within the same frame, and
+    // positional storage made the two views' stage sets overwrite each
+    // other every tick. Keyed storage lets both views' timings coexist so
+    // the F3 readout can attribute cost per view type.
+    private final java.util.Map<String, Float> rollingByLabel = new java.util.LinkedHashMap<>();
+
+    // "M" while the main view renders, "P" during a portal view (set by
+    // VoxyRenderSystem.renderOpaque from the imm_ptl portal-view token).
+    private String viewTag = "M";
 
     private boolean enabled = false;
+
+    public void setViewTag(String tag) {
+        this.viewTag = tag;
+    }
 
     public void marker() {
         this.marker(null);
@@ -30,7 +43,7 @@ public class GPUTiming {
 
     public void marker(String lable) {
         if (this.enabled) {
-            this.timingSet.capture(lable);
+            this.timingSet.capture(this.viewTag + "·" + (lable == null ? "-" : lable));
         }
     }
 
@@ -40,42 +53,55 @@ public class GPUTiming {
         }
     }
 
+    public java.util.List<String> getDebugLines() {
+        if (!this.enabled || this.rollingByLabel.isEmpty()) {
+            return java.util.List.of();
+        }
+        StringBuilder main = new StringBuilder("GpuTime main: [");
+        StringBuilder portal = new StringBuilder("GpuTime portal: [");
+        boolean anyMain = false, anyPortal = false;
+        float totalMain = 0, totalPortal = 0;
+        for (var e : this.rollingByLabel.entrySet()) {
+            String key = e.getKey();
+            boolean isPortal = key.startsWith("P·");
+            StringBuilder target = isPortal ? portal : main;
+            if (isPortal ? anyPortal : anyMain) {
+                target.append(", ");
+            }
+            target.append(key.substring(2)).append(':').append(String.format("%.2f", e.getValue()));
+            if (isPortal) { anyPortal = true; totalPortal += e.getValue(); }
+            else { anyMain = true; totalMain += e.getValue(); }
+        }
+        main.append(String.format(", Σ:%.2f]", totalMain));
+        portal.append(String.format(", Σ:%.2f]", totalPortal));
+        java.util.List<String> lines = new java.util.ArrayList<>(2);
+        if (anyMain) lines.add(main.toString());
+        if (anyPortal) lines.add(portal.toString());
+        return lines;
+    }
+
     public String getDebug() {
-        if (!this.enabled) {
-            return "";
-        }
-        StringBuilder str = new StringBuilder("GpuTime: [");
-        for (int i = 0; i < this.timings.length; i++) {
-            if (this.lables[i] != null) {
-                str.append(this.lables[i]+":"+String.format("%.2f", this.timings[i]));
-            } else {
-                str.append(String.format("%.2f", this.timings[i]));
-            }
-            if (i!=this.timings.length-1) {
-                str.append(", ");
-            }
-        }
-        str.append(']');
-        return str.toString();
+        return String.join(" | ", this.getDebugLines());
     }
 
     public void tick() {
         this.timingSet.download((meta,data)->{
+            // Sum this set's deltas per label first (unlabeled separator
+            // markers all share the "-" key), then fold into the rolling
+            // averages with the same max(decay, spike) behavior as before.
+            java.util.Map<String, Float> setSums = new java.util.LinkedHashMap<>();
             long current = data[0];
-
-            if (data.length-1!=this.timings.length) {
-                this.timings = new float[data.length-1];
-                this.lables = new String[meta.length-1];
-            }
-
-            Arrays.fill(this.lables, null);
             for (int i = 1; i < meta.length; i++) {
                 long next = data[i];
-                long delta = next - current;
-                float time = (float) (((double)delta)/1_000_000);
-                this.timings[i-1] = Math.max(this.timings[i-1]*0.99f+time*0.01f, time);
-                this.lables[i-1] = meta[i-1];
+                float time = (float) (((double)(next - current))/1_000_000);
+                setSums.merge(meta[i-1], time, Float::sum);
                 current = next;
+            }
+            for (var e : setSums.entrySet()) {
+                this.rollingByLabel.merge(
+                    e.getKey(), e.getValue(),
+                    (old, cur) -> Math.max(old*0.99f + cur*0.01f, cur)
+                );
             }
         });
         this.timingSet.tick();

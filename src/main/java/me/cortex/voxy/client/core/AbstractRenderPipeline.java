@@ -93,40 +93,68 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
     }
 
+    /**
+     * CPU wall time (ns) of the last runPipeline call's stages, for the
+     * renderOpaque spike log. Render thread only. Indices:
+     * 0 setup, 1 renderOpaque, 2 innerPrimaryWork total, 3 buildDrawCalls,
+     * 4 temporal+postOpaquePrep, 5 postOpaquePreTranslucent(ssao),
+     * 6 translucent, 7 finish, then innerPrimaryWork detail:
+     * 8 hiZ, 9 downloadTick, 10 nodeMgrTick, 11 nodeCleanTick, 12 traversal.
+     */
+    public static final long[] SPIKE_STAGE_NS = new long[13];
+
     public void runPipeline(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
+        long t0 = System.nanoTime();
         int depthTexture = this.setup(viewport, sourceFrameBuffer, srcWidth, srcHeight);
+        long t1 = System.nanoTime();
 
         var rs = ((AbstractSectionRenderer)this.sectionRenderer);
         GPUTiming.INSTANCE.marker("RO");
         rs.renderOpaque(viewport);
+        long t2 = System.nanoTime();
         var occlusionDebug = VoxyClient.getOcclusionDebugState();
         if (occlusionDebug==0) {
             GPUTiming.INSTANCE.marker("I");
             this.innerPrimaryWork(viewport, depthTexture);
             GPUTiming.INSTANCE.marker();
         }
+        long t3 = System.nanoTime();
 
         if (occlusionDebug<=1) {
             TimingStatistics.G.start();
             rs.buildDrawCalls(viewport);
             TimingStatistics.G.stop();
         }
+        long t4 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker("TP");
         rs.renderTemporal(viewport);
 
         rs.postOpaquePreperation(viewport);
+        long t5 = System.nanoTime();
 
         this.postOpaquePreTranslucent(viewport, sourceFrameBuffer);
         GPUTiming.INSTANCE.marker("RT");
+        long t6 = System.nanoTime();
 
         if (!this.deferTranslucency) {
             rs.renderTranslucent(viewport);
         }
         GPUTiming.INSTANCE.marker();
+        long t7 = System.nanoTime();
 
         this.finish(viewport, sourceFrameBuffer, srcWidth, srcHeight);
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
+        long t8 = System.nanoTime();
+
+        SPIKE_STAGE_NS[0] = t1 - t0;
+        SPIKE_STAGE_NS[1] = t2 - t1;
+        SPIKE_STAGE_NS[2] = t3 - t2;
+        SPIKE_STAGE_NS[3] = t4 - t3;
+        SPIKE_STAGE_NS[4] = t5 - t4;
+        SPIKE_STAGE_NS[5] = t6 - t5;
+        SPIKE_STAGE_NS[6] = t7 - t6;
+        SPIKE_STAGE_NS[7] = t8 - t7;
     }
 
     protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
@@ -165,9 +193,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     private static final long SCRATCH = MemoryUtil.nmemAlloc(4*4*4);
     protected static void transformBlitDepth(FullscreenBlit blitShader, int srcDepthTex, int dstFB, Viewport<?> viewport, Matrix4f targetTransform) {
-        // at this point the dst frame buffer doesn't have a stencil attachment so we don't need to keep the stencil test on for the blit
-        // in the worst case the dstFB does have a stencil attachment causing this pass to become 'corrupted'
-        glDisable(GL_STENCIL_TEST);
+        // The composite must run under the CALLER's stencil state, not with
+        // the test force-disabled: when Immersive Portals renders a portal
+        // view, dstFB is the main framebuffer with an active GL_EQUAL
+        // stencil clip restricting all drawing to the portal's screen shape.
+        // Disabling the test here (the old behavior, whose comment admitted
+        // the pass becomes "corrupted" with a stencil attachment present)
+        // wrote this fullscreen color+depth composite across the entire
+        // screen, replacing the outer view with the portal camera's terrain.
+        // Without a stencil-using caller the captured state is "disabled"
+        // and this is identical to the old code.
+        me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE.apply();
         glBindFramebuffer(GL30.GL_FRAMEBUFFER, dstFB);
 
         blitShader.bind();
@@ -185,8 +221,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected void innerPrimaryWork(Viewport<?> viewport, int depthBuffer) {
 
+        long t0 = System.nanoTime();
         //Compute the mip chain
         viewport.hiZBuffer.buildMipChain(depthBuffer, viewport.width, viewport.height);
+        long t1 = System.nanoTime();
+        SPIKE_STAGE_NS[8] = t1 - t0;
+        SPIKE_STAGE_NS[9] = 0;
+        SPIKE_STAGE_NS[10] = 0;
+        SPIKE_STAGE_NS[11] = 0;
+        SPIKE_STAGE_NS[12] = 0;
 
         do {
             TimingStatistics.main.stop();
@@ -196,11 +239,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             //Tick download stream
             DownloadStream.INSTANCE.tick();
             TimingStatistics.D.stop();
+            long t2 = System.nanoTime();
+            SPIKE_STAGE_NS[9] += t2 - t1;
 
             this.nodeManager.tick(this.traversal.getNodeBuffer(), this.nodeCleaner);
             //glFlush();
+            long t3 = System.nanoTime();
+            SPIKE_STAGE_NS[10] += t3 - t2;
 
             this.nodeCleaner.tick(this.traversal.getNodeBuffer());//Probably do this here??
+            long t4 = System.nanoTime();
+            SPIKE_STAGE_NS[11] += t4 - t3;
 
             TimingStatistics.dynamic.stop();
             TimingStatistics.main.start();
@@ -210,6 +259,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             TimingStatistics.F.start();
             this.traversal.doTraversal(viewport);
             TimingStatistics.F.stop();
+            t1 = System.nanoTime();
+            SPIKE_STAGE_NS[12] += t1 - t4;
         } while (this.frexStillHasWork.getAsBoolean());
     }
 

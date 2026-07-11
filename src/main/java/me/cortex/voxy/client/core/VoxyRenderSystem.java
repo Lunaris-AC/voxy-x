@@ -71,6 +71,21 @@ public class VoxyRenderSystem {
     private final RenderDistanceTracker renderDistanceTracker;
     public final ChunkBoundRenderer chunkBoundRenderer;
 
+    // Confirmed via logging (2026-07-07): renderOpaque() is called twice in
+    // the same frame whenever a portal shows another view of the same
+    // dimension (Immersive Portals reuses this same LevelRenderer/
+    // VoxyRenderSystem for same-dimension portal views, just with a
+    // different camera). renderDistanceTracker.setCenterAndProcess below can
+    // reorganize/evict the geometry buffer based on camera position; running
+    // it a second time mid-frame with the portal's different camera position
+    // was racing against still-pending GPU draw commands from the first
+    // call's runPipeline(), corrupting the geometry those commands read
+    // (visible as exploded/garbage terrain, only when a portal is in view).
+    private int lastProcessedFrame = -1;
+
+    // Rate limiter for the renderOpaque spike log below.
+    private long lastSpikeLogNanos = 0;
+
     private final ViewportSelector<?> viewportSelector;
 
     private final AbstractRenderPipeline pipeline;
@@ -253,10 +268,37 @@ public class VoxyRenderSystem {
         GPUTiming.INSTANCE.marker();//Start marker
         TimingStatistics.main.start();
 
+        // Capture the caller's stencil state (Immersive Portals clips portal
+        // views with GL_EQUAL stencil testing; the composite blit and the
+        // state handback below must honor it, see CallerStencilState).
+        me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE.capture();
+
+        // Attribute this pass's GPU timings to the right view type in the
+        // F3 readout (M = main view, P = a portal's nested view).
+        GPUTiming.INSTANCE.setViewTag(
+            me.cortex.voxy.client.core.util.ImmersivePortalsCompat.getCurrentPortalViewToken() != null ? "P" : "M"
+        );
+
         //TODO: optimize
         int[] oldBufferBindings = new int[10];
+        long[] oldBufferStarts = new long[10];
+        long[] oldBufferSizes = new long[10];
         for (int i = 0; i < oldBufferBindings.length; i++) {
             oldBufferBindings[i] = glGetIntegeri(GL_SHADER_STORAGE_BUFFER_BINDING, i);
+            if (oldBufferBindings[i] != 0) {
+                // glBindBufferBase only restores which buffer object is bound,
+                // not the offset/size of the range that was actually in
+                // effect (e.g. if it was bound via glBindBufferRange for a
+                // partial region). Restoring only the buffer id here left
+                // whatever runs after Voxy (portal rendering, Sodium's own
+                // passes) reading the wrong slice of a shared SSBO whenever
+                // the original binding was range-limited - only observable
+                // when something else actually relies on that range, which
+                // lines up with the corruption only appearing with a portal
+                // in view.
+                oldBufferStarts[i] = org.lwjgl.opengl.GL32.glGetInteger64i(org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_START, i);
+                oldBufferSizes[i] = org.lwjgl.opengl.GL32.glGetInteger64i(org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_SIZE, i);
+            }
         }
 
 
@@ -276,6 +318,8 @@ public class VoxyRenderSystem {
 
         //this.autoBalanceSubDivSize();
 
+        long spikeT0 = System.nanoTime();
+
         this.pipeline.preSetup(viewport);
 
         TimingStatistics.E.start();
@@ -286,31 +330,92 @@ public class VoxyRenderSystem {
         }
         TimingStatistics.E.stop();
 
+        long spikeT1 = System.nanoTime();
 
         GPUTiming.INSTANCE.marker();
         //The entire rendering pipeline (excluding the chunkbound thing)
         this.pipeline.runPipeline(viewport, boundFB, dims[2], dims[3]);
         GPUTiming.INSTANCE.marker();
 
+        long spikeT2 = System.nanoTime();
 
         TimingStatistics.main.stop();
         TimingStatistics.postDynamic.start();
 
         PrintfDebugUtil.tick();
 
+        long spikeT3, spikeT4;
         //As much dynamic runtime stuff here
         {
             //Tick upload stream (this is ok to do here as upload ticking is just memory management)
             UploadStream.INSTANCE.tick();
 
-            while (this.renderDistanceTracker.setCenterAndProcess(viewport.cameraX, viewport.cameraZ) && VoxyClient.isFrexActive());//While FF is active, run until everything is processed
-            TimingStatistics.H.start();
-            //Done here as is allows less gl state resetup
-            do { this.modelService.tick(900_000); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
-            TimingStatistics.H.stop();
+            spikeT3 = System.nanoTime();
+
+            int currentFrame = me.cortex.voxy.client.core.util.FrameCounter.frame;
+            if (currentFrame != this.lastProcessedFrame) {
+                this.lastProcessedFrame = currentFrame;
+
+                while (this.renderDistanceTracker.setCenterAndProcess(viewport.cameraX, viewport.cameraZ, 1_000_000L) && VoxyClient.isFrexActive());//While FF is active, run until everything is processed (1ms/frame budget otherwise)
+                spikeT4 = System.nanoTime();
+                TimingStatistics.H.start();
+                //Done here as is allows less gl state resetup
+                //Adaptive budget: during load bursts (world join, big camera
+                //moves) many block models bake at once - a 0.9ms/frame
+                //upload budget dominated the time-to-stable. With a deep
+                //queue, spend up to 4ms; it self-regulates back down as the
+                //queue drains.
+                long modelBudget = this.modelService.getProcessingCount() > 64 ? 4_000_000L : 900_000L;
+                do { this.modelService.tick(modelBudget); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
+                TimingStatistics.H.stop();
+            } else {
+                spikeT4 = spikeT3;
+            }
         }
         GPUTiming.INSTANCE.marker();
         TimingStatistics.postDynamic.stop();
+
+        // Spike diagnostics for the reported camera-turn micro-freezes: the
+        // rolling F3 averages hide single slow frames, so when this call's
+        // CPU wall time blows past the threshold, log a one-line stage
+        // breakdown (rate-limited; zero overhead on normal frames beyond a
+        // few nanoTime reads).
+        {
+            long spikeEnd = System.nanoTime();
+            long totalNs = spikeEnd - spikeT0;
+            if (totalNs > 10_000_000L && spikeEnd - lastSpikeLogNanos > 500_000_000L) {
+                lastSpikeLogNanos = spikeEnd;
+                long[] p = AbstractRenderPipeline.SPIKE_STAGE_NS;
+                long[] b = me.cortex.voxy.client.core.rendering.section.backend.meshlet.MeshShaderSectionRenderer.BUILD_SPIKE_NS;
+                long[] nt = me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.TICK_SPIKE_NS;
+                int[] nc = me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager.TICK_SPIKE_COUNTS;
+                Logger.info(String.format(
+                    "[spike] voxy renderOpaque %.1fms (view=%s): chunkBound=%.1f pipeline=%.1f uploadTick=%.1f lodTracker=%.1f modelSvc=%.1f"
+                    + " | pipe: setup=%.1f ro=%.1f inner=%.1f(hiz=%.1f dl=%.1f node=%.1f clean=%.1f trav=%.1f) build=%.1f tmp=%.1f ssao=%.1f transl=%.1f fin=%.1f"
+                    + " | build: uni=%.1f prep=%.1f cull=%.1f cg=%.1f ts=%.1f mp=%.1f"
+                    + " | lod: move=%.1f proc=%.1f",
+                    totalNs / 1e6,
+                    me.cortex.voxy.client.core.util.ImmersivePortalsCompat.getCurrentPortalViewToken() != null ? "portal" : "main",
+                    (spikeT1 - spikeT0) / 1e6,
+                    (spikeT2 - spikeT1) / 1e6,
+                    (spikeT3 - spikeT2) / 1e6,
+                    (spikeT4 - spikeT3) / 1e6,
+                    (spikeEnd - spikeT4) / 1e6,
+                    p[0] / 1e6, p[1] / 1e6, p[2] / 1e6,
+                    p[8] / 1e6, p[9] / 1e6, p[10] / 1e6, p[11] / 1e6, p[12] / 1e6,
+                    p[3] / 1e6, p[4] / 1e6, p[5] / 1e6, p[6] / 1e6, p[7] / 1e6,
+                    b[0] / 1e6, b[1] / 1e6, b[2] / 1e6, b[3] / 1e6, b[4] / 1e6, b[5] / 1e6,
+                    me.cortex.voxy.client.core.rendering.RenderDistanceTracker.SPIKE_MOVE_NS / 1e6,
+                    me.cortex.voxy.client.core.rendering.RenderDistanceTracker.SPIKE_PROCESS_NS / 1e6
+                ) + String.format(
+                    " | nodeTick: tln=%.1f(%d) geoUp=%.1f(%d) scatter=%.1f(%d) clean=%.1f(%d)"
+                    + " | upStream: commit=%.1f(%d copies) fence=%.1f",
+                    nt[0] / 1e6, nc[0], nt[1] / 1e6, nc[1], nt[2] / 1e6, nc[2], nt[3] / 1e6, nc[3],
+                    UploadStream.TICK_SPIKE_COMMIT_NS / 1e6, UploadStream.TICK_SPIKE_COPIES,
+                    UploadStream.TICK_SPIKE_FENCE_NS / 1e6
+                ));
+            }
+        }
 
         GPUTiming.INSTANCE.tick();
 
@@ -320,7 +425,12 @@ public class VoxyRenderSystem {
         {//Reset state manager stuffs
             glUseProgram(0);
             glEnable(GL_DEPTH_TEST);
-            glDisable(GL_STENCIL_TEST);
+            // Hand the stencil state back exactly as the caller had it.
+            // Blindly disabling the stencil test here broke Immersive
+            // Portals' portal-shape clipping for everything the portal view
+            // drew after voxy (entities, remaining terrain passes, ...),
+            // splattering it across the whole screen.
+            me.cortex.voxy.client.core.rendering.util.CallerStencilState.INSTANCE.apply();
 
             GlStateManager._glBindVertexArray(0);//Clear binding
 
@@ -333,10 +443,15 @@ public class VoxyRenderSystem {
 
             IrisUtil.clearIrisSamplers();//Thanks iris (sigh)
 
-            //TODO: should/needto actually restore all of these, not just clear them
-            //Clear all the bindings
+            //Restore the bindings, including the offset/size range if the
+            //original binding was a partial glBindBufferRange rather than a
+            //full-buffer glBindBufferBase (see the capture above).
             for (int i = 0; i < oldBufferBindings.length; i++) {
-                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i]);
+                if (oldBufferBindings[i] == 0) {
+                    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, i, 0);
+                } else {
+                    org.lwjgl.opengl.GL30.glBindBufferRange(GL_SHADER_STORAGE_BUFFER, i, oldBufferBindings[i], oldBufferStarts[i], oldBufferSizes[i]);
+                }
             }
 
             //((SodiumShader) Iris.getPipelineManager().getPipelineNullable().getSodiumPrograms().getProgram(DefaultTerrainRenderPasses.CUTOUT).getInterface()).setupState(DefaultTerrainRenderPasses.CUTOUT, fogParameters);
@@ -490,7 +605,7 @@ public class VoxyRenderSystem {
             debug.add("Extra time: " + TimingStatistics.A.pVal() + ", " + TimingStatistics.B.pVal() + ", " + TimingStatistics.C.pVal() + ", " + TimingStatistics.D.pVal());
             debug.add("Extra 2 time: " + TimingStatistics.E.pVal() + ", " + TimingStatistics.F.pVal() + ", " + TimingStatistics.G.pVal() + ", " + TimingStatistics.H.pVal() + ", " + TimingStatistics.I.pVal());
         }
-        debug.add(GPUTiming.INSTANCE.getDebug());
+        debug.addAll(GPUTiming.INSTANCE.getDebugLines());
         PrintfDebugUtil.addToOut(debug);
     }
 
