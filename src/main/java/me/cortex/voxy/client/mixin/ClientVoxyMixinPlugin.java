@@ -12,13 +12,11 @@ import java.util.Set;
 public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     private static boolean valkyrienSkiesInstalled;
     private static boolean nvidiumInstalled;
-    private static boolean connectorInstalled = false;
 
     @Override
     public void onLoad(String mixinPackage) {
         valkyrienSkiesInstalled = FabricLoader.getInstance().isModLoaded("valkyrienskies");
         nvidiumInstalled = FabricLoader.getInstance().isModLoaded("nvidium");
-        connectorInstalled = FabricLoader.getInstance().isModLoaded("connector");
     }
 
     @Override
@@ -32,10 +30,10 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
             mixins.add("sodium.MixinDefaultChunkRenderer");
         }
 
-        if (connectorInstalled) {
-            mixins.add("sodium.MixinShaderLoader");
-        }
-
+        // MixinShaderLoader (Connector-only) is gone: it worked around a
+        // classloader bug in Sodium 0.6's getShaderSource that Sodium 0.8
+        // already fixes internally (ShaderLoader.class.getClassLoader()
+        // instead of the caller's classloader).
         return mixins;
     }
 
