@@ -24,13 +24,38 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
     @Shadow private @Nullable ClientLevel level;
     @Unique private VoxyRenderSystem renderer;
 
+    // Set when the resource manager actually reloaded (textures/models
+    // changed, so voxy's baked block models are stale and the engine must
+    // rebuild). Everything else that funnels through allChanged - video
+    // settings, render distance changes, F3+A, mods poking the renderer -
+    // does not invalidate any state the render system owns (LOD tree,
+    // geometry, compiled shaders, baked models), yet the unconditional
+    // rebuild cost 1.5-4.3s on the render thread (measured on ECHO,
+    // 2026-07-11: a mod-triggered allChanged ~70s after join was the
+    // recurring "max MSPT ~3.5s" freeze in every spark profile).
+    @Unique private boolean voxy$resourcesDirty = false;
+
     @Override
     public VoxyRenderSystem voxy$getRenderSystem() {
         return this.renderer;
     }
 
+    @Inject(method = "onResourceManagerReload", at = @At("HEAD"))
+    private void voxy$markResourcesDirty(net.minecraft.server.packs.resources.ResourceManager resourceManager, CallbackInfo ci) {
+        this.voxy$resourcesDirty = true;
+    }
+
     @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
+        if (this.renderer != null && !this.voxy$resourcesDirty) {
+            // Same level (setLevel/close already shut the renderer down on
+            // level changes, so a live renderer here means the level didn't
+            // change), no resource reload: keep the engine. The /voxy reload
+            // command still forces a rebuild - it shuts the renderer down
+            // itself before calling allChanged.
+            return;
+        }
+        this.voxy$resourcesDirty = false;
         this.voxy$shutdownRenderer();
         if (this.level != null) {
             this.voxy$createRenderer();
